@@ -1,0 +1,16 @@
+.DS_Store
+node_modules/
+dist/
+coverage/
+.nyc_output/
+*.log
+.env
+.env.*
+!.env.example
+Saved/
+Intermediate/
+DerivedDataCache/
+Binaries/
+__pycache__/
+*.pyc
+

@@ -1,0 +1,21 @@
+{
+	"catalog": "@phosphor-icons/core",
+	"catalogVersion": "2.1.1",
+	"icons": [
+		{
+			"name": "engine",
+			"categories": ["maps & travel", "objects"],
+			"tags": ["motor", "repair", "vehicles", "automobile"]
+		},
+		{
+			"name": "acorn",
+			"categories": ["finances", "nature"],
+			"tags": ["savings", "nut", "*internal*"]
+		},
+		{
+			"name": "3d-rotate",
+			"categories": ["design"],
+			"tags": ["cube", "turn"]
+		}
+	]
+}

@@ -1,0 +1,22 @@
+{
+	"modRef": "MyIconPack",
+	"name": "My Icon Pack",
+	"sectionName": "My Icons",
+	"assetPrefix": "T_MyIcon_",
+	"idBase": 50000,
+	"iconType": "Monochrome",
+	"size": 512,
+	"color": "#ffffff",
+	"pluginIconAsset": "engine",
+	"source": {
+		"type": "svg-folder",
+		"dir": "icons",
+		"weight": "",
+		"styleName": "custom-svg",
+		"name": "Local SVG Icons",
+		"license": null
+	},
+	"output": {
+		"root": "."
+	}
+}

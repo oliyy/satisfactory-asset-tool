@@ -1,0 +1,8 @@
+packages:
+  - '.'
+
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - '@typescript-eslint/*'
+  - '@keyv/bigmap'
+minimumReleaseAgeIgnoreMissingTime: true
