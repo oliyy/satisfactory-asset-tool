@@ -2,10 +2,10 @@
 
 Tooling for automatically building and importing Satisfactory asset packs into Unreal projects.
 
-The tool supports two source workflows:
+The tool currently supports two sources for automatic asset creation:
 
-- local SVG or PNG files become new texture assets inside your mod
-- existing Unreal `Texture2D` assets are referenced directly in your mod's `FGIconLibrary`
+- local SVG or PNG files
+- existing Unreal `Texture2D` assets from the Starter Project
 
 ## Which Workflow Do I Need?
 
