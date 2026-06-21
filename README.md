@@ -28,7 +28,7 @@ Commands are non-interactive and return nonzero exit codes on failure, so they a
 Install the package in the asset pack project:
 
 ```bash
-npm install --save-dev @oliy/satisfactory-asset-tool
+npm install --save-dev @oliyy_/satisfactory-asset-tool
 ```
 
 ## Quick Start
