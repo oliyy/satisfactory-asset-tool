@@ -1,19 +1,30 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { MAX_LOCAL_ICON_ID } from './ids.js'
 import { normalizeAssetSlug } from './naming.js'
 import type {
 	AssetPackConfig,
 	AssetPackOverrides,
+	BackgroundConfig,
 	RawAssetPackConfig,
+	RawBackgroundConfig,
+	RawSignImageBackgroundVariant,
 	RawSourceConfig,
+	SignImageBackgroundConfig,
+	SignImageBackgroundMode,
+	SignImageBackgroundVariant,
 	SourceType,
 	UnrealTextureSourceAsset,
 } from './types.js'
 
 const DEFAULT_STYLE_SUFFIXES = ['bold', 'duotone', 'fill', 'light', 'regular', 'thin']
 const VALID_ICON_TYPE_NAMES = ['Building', 'Part', 'Equipment', 'Monochrome', 'Material', 'Custom', 'MapStamp', 'None']
+const MATERIAL_ICON_TYPE = 'EIconType::ESIT_Material'
+const DEFAULT_SIGN_BACKGROUND_PARENT = '/Game/FactoryGame/Interface/UI/InGame/Signs/SignBackgrounds/MM_UI_SignBG.MM_UI_SignBG'
+const FALLBACK_TOOL_VERSION = '0.2.0'
+const TOOL_PACKAGE_NAMES = new Set(['@oliy/satisfactory-asset-tool', '@oliyy_/satisfactory-asset-tool'])
 const ICON_TYPES = new Map<string, string>([
 	['building', 'EIconType::ESIT_Building'],
 	['part', 'EIconType::ESIT_Part'],
@@ -39,9 +50,17 @@ export async function loadAssetPackConfig(configPath: string): Promise<AssetPack
 	const sourceStyle = source.styleName ?? (sourceWeight || sourceType)
 	const output = rawConfig.output ?? {}
 	const unreal = rawConfig.unreal ?? {}
+	const background = normalizeBackgroundConfig(rawConfig.background, modRef, configPath)
 	const generation = rawConfig.generation ?? {}
 	const idBase = normalizeIdBase(rawConfig.idBase ?? 50000, configPath)
 	const size = normalizePositiveInteger(rawConfig.size ?? 512, `${configPath} size`)
+	const iconType = normalizeIconType(rawConfig.iconType ?? (background.type === 'sign-image' ? 'Material' : 'Monochrome'), configPath)
+	const toolVersion = await readToolPackageVersion(import.meta.url)
+
+	if (background.type === 'sign-image' && iconType !== MATERIAL_ICON_TYPE) {
+		return fail(`${configPath} background.type "sign-image" requires iconType Material`)
+	}
+	validateBackgroundSourceConfig(sourceType, background, configPath)
 
 	return {
 		configPath: absoluteConfigPath,
@@ -52,7 +71,7 @@ export async function loadAssetPackConfig(configPath: string): Promise<AssetPack
 		sectionName: rawConfig.sectionName ?? modRef,
 		assetPrefix: rawConfig.assetPrefix ?? `T_${modRef}_`,
 		idBase,
-		iconType: normalizeIconType(rawConfig.iconType ?? 'Monochrome', configPath),
+		iconType,
 		size,
 		color: rawConfig.color ?? '#ffffff',
 		pluginIconAsset: rawConfig.pluginIconAsset ?? null,
@@ -94,11 +113,177 @@ export async function loadAssetPackConfig(configPath: string): Promise<AssetPack
 				...(unreal.textureSettings ?? {}),
 			},
 		},
+		background,
 		generation: {
 			tool: generation.tool ?? 'satisfactory-asset-tool',
-			version: generation.version ?? '0.1.0',
+			version: generation.version ?? toolVersion,
 		},
 	}
+}
+
+async function readToolPackageVersion(moduleUrl: string): Promise<string> {
+	const moduleDir = path.dirname(fileURLToPath(moduleUrl))
+	const candidatePackagePaths = [path.resolve(moduleDir, '../../../package.json'), path.resolve(moduleDir, '../../package.json')]
+	const packageVersion = await candidatePackagePaths.reduce<Promise<string | null>>(async (previous, packagePath) => {
+		const foundVersion = await previous
+		return foundVersion ?? readPackageVersion(packagePath)
+	}, Promise.resolve(null))
+
+	return packageVersion ?? FALLBACK_TOOL_VERSION
+}
+
+async function readPackageVersion(packagePath: string): Promise<string | null> {
+	try {
+		const packageJson = JSON.parse(await readFile(packagePath, 'utf8')) as { name?: unknown; version?: unknown }
+		return typeof packageJson.name === 'string' && TOOL_PACKAGE_NAMES.has(packageJson.name) && typeof packageJson.version === 'string'
+			? packageJson.version
+			: null
+	} catch {
+		return null
+	}
+}
+
+function normalizeBackgroundConfig(value: RawBackgroundConfig | undefined, modRef: string, source: string): BackgroundConfig {
+	if (!value || !value.type || value.type === 'none') {
+		return { type: 'none' }
+	}
+
+	if (value.type !== 'sign-image') {
+		return fail(`${source} background.type must be one of: none, sign-image`)
+	}
+
+	const baseConfig = {
+		type: 'sign-image',
+		mode: normalizeBackgroundMode(value.mode ?? 'contain', `${source} background.mode`),
+		tileWidth: normalizeOptionalPositiveNumber(value.tileWidth, `${source} background.tileWidth`),
+		tileHeight: normalizeOptionalPositiveNumber(value.tileHeight, `${source} background.tileHeight`),
+		baseTileHeight: normalizePositiveNumber(value.baseTileHeight ?? 400, `${source} background.baseTileHeight`),
+		targetAspect: normalizeOptionalAspect(value.targetAspect, `${source} background.targetAspect`),
+		fitScale: normalizePositiveNumber(value.fitScale ?? 1, `${source} background.fitScale`),
+		refractionDepthBias: normalizeNumber(value.refractionDepthBias ?? 0, `${source} background.refractionDepthBias`),
+		materialDir: stringOrDefault(value.materialDir, 'SignBackgrounds'),
+		materialAssetPrefix: stringOrDefault(value.materialAssetPrefix, `MI_${modRef}_`),
+		parentMaterialObjectPath: normalizeTextureObjectPath(
+			value.parentMaterialObjectPath ?? DEFAULT_SIGN_BACKGROUND_PARENT,
+			`${source} background.parentMaterialObjectPath`,
+		),
+		textureParameter: stringOrDefault(value.textureParameter, 'Texture'),
+	} satisfies Omit<SignImageBackgroundConfig, 'variants'>
+
+	return {
+		...baseConfig,
+		variants: normalizeBackgroundVariants(value.variants, baseConfig, `${source} background.variants`),
+	}
+}
+
+function normalizeBackgroundVariants(
+	variants: RawSignImageBackgroundVariant[] | undefined,
+	baseConfig: Omit<SignImageBackgroundConfig, 'variants'>,
+	source: string,
+): SignImageBackgroundVariant[] {
+	if (!variants || variants.length === 0) {
+		const defaultVariant = {
+			suffix: null,
+			displayNameSuffix: null,
+			mode: baseConfig.mode,
+			tileWidth: baseConfig.tileWidth,
+			tileHeight: baseConfig.tileHeight,
+			baseTileHeight: baseConfig.baseTileHeight,
+			targetAspect: baseConfig.targetAspect,
+			fitScale: baseConfig.fitScale,
+			refractionDepthBias: baseConfig.refractionDepthBias,
+		}
+		validateBackgroundVariant(defaultVariant, source)
+		return [defaultVariant]
+	}
+
+	return variants.map((variant, index) => normalizeBackgroundVariant(variant, baseConfig, `${source}[${index}]`))
+}
+
+function normalizeBackgroundVariant(
+	variant: RawSignImageBackgroundVariant,
+	baseConfig: Omit<SignImageBackgroundConfig, 'variants'>,
+	source: string,
+): SignImageBackgroundVariant {
+	const suffix = variant.suffix === undefined ? fail(`${source}.suffix is required when background.variants is used`) : variant.suffix
+	const normalizedSuffix = assertNormalizedSlug(suffix, `${source}.suffix`)
+	const displayNameSuffix =
+		typeof variant.displayNameSuffix === 'string' && variant.displayNameSuffix.trim() ? variant.displayNameSuffix.trim() : null
+
+	const normalizedVariant = {
+		suffix: normalizedSuffix,
+		displayNameSuffix,
+		mode: normalizeBackgroundMode(variant.mode ?? baseConfig.mode, `${source}.mode`),
+		tileWidth: normalizeOptionalPositiveNumber(variant.tileWidth ?? baseConfig.tileWidth ?? undefined, `${source}.tileWidth`),
+		tileHeight: normalizeOptionalPositiveNumber(variant.tileHeight ?? baseConfig.tileHeight ?? undefined, `${source}.tileHeight`),
+		baseTileHeight: normalizePositiveNumber(variant.baseTileHeight ?? baseConfig.baseTileHeight, `${source}.baseTileHeight`),
+		targetAspect: normalizeOptionalAspect(variant.targetAspect ?? baseConfig.targetAspect ?? undefined, `${source}.targetAspect`),
+		fitScale: normalizePositiveNumber(variant.fitScale ?? baseConfig.fitScale, `${source}.fitScale`),
+		refractionDepthBias: normalizeNumber(variant.refractionDepthBias ?? baseConfig.refractionDepthBias, `${source}.refractionDepthBias`),
+	}
+	validateBackgroundVariant(normalizedVariant, source)
+	return normalizedVariant
+}
+
+function validateBackgroundVariant(variant: SignImageBackgroundVariant, source: string): void {
+	if (variant.mode === 'cover' && variant.targetAspect === null && (variant.tileWidth === null || variant.tileHeight === null)) {
+		return fail(`${source} cover mode requires targetAspect or both tileWidth and tileHeight`)
+	}
+}
+
+function validateBackgroundSourceConfig(sourceType: SourceType, background: BackgroundConfig, source: string): void {
+	if (background.type !== 'sign-image' || sourceType !== 'unreal-texture-list') {
+		return
+	}
+
+	const coverVariants = background.variants.filter((variant) => variant.mode === 'cover')
+	if (coverVariants.length > 0) {
+		return fail(
+			`${source} background cover mode requires local svg-folder or png-folder sources because existing Unreal textures cannot be cropped`,
+		)
+	}
+}
+
+function normalizeBackgroundMode(value: string, source: string): SignImageBackgroundMode {
+	return value === 'contain' || value === 'cover' || value === 'tile' ? value : fail(`${source} must be one of: contain, cover, tile`)
+}
+
+function normalizeOptionalAspect(value: number | string | undefined | null, source: string): number | null {
+	if (value === undefined || value === null) {
+		return null
+	}
+	if (typeof value === 'number') {
+		return normalizePositiveNumber(value, source)
+	}
+
+	const trimmed = value.trim()
+	const ratioMatch = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(trimmed)
+	if (ratioMatch) {
+		const width = Number(ratioMatch[1])
+		const height = Number(ratioMatch[2])
+		if (width > 0 && height > 0) {
+			return width / height
+		}
+	}
+
+	const parsed = Number(trimmed)
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fail(`${source} must be a positive number or ratio like "16:9"`)
+}
+
+function normalizeOptionalPositiveNumber(value: number | undefined | null, source: string): number | null {
+	return value === undefined || value === null ? null : normalizePositiveNumber(value, source)
+}
+
+function normalizePositiveNumber(value: number, source: string): number {
+	return Number.isFinite(value) && value > 0 ? value : fail(`${source} must be a positive number`)
+}
+
+function normalizeNumber(value: number, source: string): number {
+	return Number.isFinite(value) ? value : fail(`${source} must be a number`)
+}
+
+function stringOrDefault(value: string | undefined, fallback: string): string {
+	return typeof value === 'string' && value.trim() ? value.trim() : fallback
 }
 
 function normalizeSourceType(value: string, source: string): SourceType {

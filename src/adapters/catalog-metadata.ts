@@ -41,7 +41,7 @@ export function catalogEntryForRecord(
 	catalogByName: Map<string, SourceCatalogEntry>,
 	slugOverrides: Record<string, string> = {},
 ): { sourceSlug: string; catalogEntry: SourceCatalogEntry } {
-	const sourceSlug = slugOverrides[record.slug] ?? record.slug
+	const sourceSlug = slugOverrides[record.slug] ?? slugOverrides[record.sourceSlug] ?? record.sourceSlug
 	const catalogEntry = catalogByName.get(sourceSlug)
 
 	return {

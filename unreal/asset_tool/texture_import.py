@@ -50,6 +50,27 @@ def import_texture(metadata, source_png_path: Path, warn):
     if "sRGB" in settings:
         try_set_first_property(texture, ["srgb", "SRGB", "sRGB"], bool(settings["sRGB"]), warn)
 
+    if hasattr(unreal, "TextureAddress"):
+        address_candidates = {
+            "Wrap": ["TA_WRAP", "TA_Wrap"],
+            "Clamp": ["TA_CLAMP", "TA_Clamp"],
+            "Mirror": ["TA_MIRROR", "TA_Mirror"],
+        }
+        if "AddressX" in settings:
+            try_set_first_property(
+                texture,
+                ["address_x", "AddressX"],
+                enum_value(unreal.TextureAddress, address_candidates.get(settings["AddressX"], [settings["AddressX"]])),
+                warn,
+            )
+        if "AddressY" in settings:
+            try_set_first_property(
+                texture,
+                ["address_y", "AddressY"],
+                enum_value(unreal.TextureAddress, address_candidates.get(settings["AddressY"], [settings["AddressY"]])),
+                warn,
+            )
+
     if hasattr(unreal, "TextureGroup"):
         group_name = settings.get("TextureGroup")
         group_candidates = {
@@ -64,4 +85,3 @@ def import_texture(metadata, source_png_path: Path, warn):
 
     unreal.EditorAssetLibrary.save_loaded_asset(texture)
     return texture
-

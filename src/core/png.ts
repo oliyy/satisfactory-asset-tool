@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises'
-import { inflateSync } from 'node:zlib'
+import { readFile, writeFile } from 'node:fs/promises'
+import { deflateSync, inflateSync } from 'node:zlib'
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
@@ -37,6 +37,42 @@ export async function validateWhiteRgbaPng(filePath: string, expectedSize: numbe
 	if (transparentPixels === 0) {
 		throw new Error(`${filePath} has no transparent background pixels`)
 	}
+}
+
+export async function readPngDimensions(filePath: string): Promise<{ width: number; height: number }> {
+	const png = readPngRgba(await readFile(filePath))
+	return { width: png.width, height: png.height }
+}
+
+export async function validateBackgroundPng(filePath: string): Promise<{ width: number; height: number }> {
+	const png = readPngRgba(await readFile(filePath))
+	if (png.width <= 0 || png.height <= 0) {
+		throw new Error(`${filePath} has invalid dimensions ${png.width}x${png.height}`)
+	}
+	return { width: png.width, height: png.height }
+}
+
+export async function cropCoverPng(
+	inputPath: string,
+	outputPath: string,
+	targetAspect: number,
+): Promise<{ width: number; height: number }> {
+	const source = readPngRgba(await readFile(inputPath))
+	const sourceAspect = source.width / source.height
+	const cropWidth = sourceAspect > targetAspect ? Math.max(1, Math.round(source.height * targetAspect)) : source.width
+	const cropHeight = sourceAspect > targetAspect ? source.height : Math.max(1, Math.round(source.width / targetAspect))
+	const cropX = Math.floor((source.width - cropWidth) / 2)
+	const cropY = Math.floor((source.height - cropHeight) / 2)
+	const pixels = Buffer.alloc(cropWidth * cropHeight * 4)
+
+	for (let row = 0; row < cropHeight; row += 1) {
+		const sourceStart = ((cropY + row) * source.width + cropX) * 4
+		const sourceEnd = sourceStart + cropWidth * 4
+		source.pixels.copy(pixels, row * cropWidth * 4, sourceStart, sourceEnd)
+	}
+
+	await writeFile(outputPath, writePngRgba(cropWidth, cropHeight, pixels))
+	return { width: cropWidth, height: cropHeight }
 }
 
 export function readPngRgba(buffer: Buffer): {
@@ -83,7 +119,9 @@ export function readPngRgba(buffer: Buffer): {
 	}
 
 	if (bitDepth !== 8 || colorType !== 6) {
-		throw new Error(`Expected 8-bit RGBA PNG, got bitDepth=${bitDepth} colorType=${colorType}`)
+		throw new Error(
+			`Expected 8-bit RGBA PNG, got bitDepth=${bitDepth} colorType=${colorType}. Convert RGB, indexed, grayscale, JPEG, or WebP sources to RGBA PNG before generating assets.`,
+		)
 	}
 
 	const bytesPerPixel = 4
@@ -108,6 +146,64 @@ export function readPngRgba(buffer: Buffer): {
 
 	return { width, height, bitDepth, colorType, pixels }
 }
+
+export function writePngRgba(width: number, height: number, pixels: Buffer): Buffer {
+	if (pixels.length !== width * height * 4) {
+		throw new Error(`Invalid RGBA buffer length ${pixels.length}; expected ${width * height * 4}`)
+	}
+
+	const stride = width * 4
+	const scanlines = Buffer.alloc((stride + 1) * height)
+	for (let row = 0; row < height; row += 1) {
+		const outputOffset = row * (stride + 1)
+		scanlines[outputOffset] = 0
+		pixels.copy(scanlines, outputOffset + 1, row * stride, row * stride + stride)
+	}
+
+	return Buffer.concat([
+		PNG_SIGNATURE,
+		pngChunk('IHDR', ihdr(width, height)),
+		pngChunk('IDAT', deflateSync(scanlines)),
+		pngChunk('IEND', Buffer.alloc(0)),
+	])
+}
+
+function ihdr(width: number, height: number): Buffer {
+	const data = Buffer.alloc(13)
+	data.writeUInt32BE(width, 0)
+	data.writeUInt32BE(height, 4)
+	data.writeUInt8(8, 8)
+	data.writeUInt8(6, 9)
+	data.writeUInt8(0, 10)
+	data.writeUInt8(0, 11)
+	data.writeUInt8(0, 12)
+	return data
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+	const typeBuffer = Buffer.from(type, 'ascii')
+	const length = Buffer.alloc(4)
+	length.writeUInt32BE(data.length, 0)
+	const crc = Buffer.alloc(4)
+	crc.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 0)
+	return Buffer.concat([length, typeBuffer, data, crc])
+}
+
+function crc32(buffer: Buffer): number {
+	let crc = 0xffffffff
+	for (const byte of buffer) {
+		crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff]!
+	}
+	return (crc ^ 0xffffffff) >>> 0
+}
+
+const CRC_TABLE = Array.from({ length: 256 }, (_, index) => {
+	let crc = index
+	for (let bit = 0; bit < 8; bit += 1) {
+		crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1
+	}
+	return crc >>> 0
+})
 
 function unfilterRow(row: Buffer, previousRow: Buffer, filter: number, bytesPerPixel: number): void {
 	switch (filter) {

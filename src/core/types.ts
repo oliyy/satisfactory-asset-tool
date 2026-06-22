@@ -1,6 +1,9 @@
 export type SourceType = 'svg-folder' | 'png-folder' | 'unreal-texture-list'
 export type SourceAssetType = 'svg' | 'png' | 'unreal-texture'
 export type TextureSource = 'generated' | 'unreal-existing'
+export type BackgroundType = 'none' | 'sign-image'
+export type SignImageBackgroundMode = 'contain' | 'cover' | 'tile'
+export type IconObjectType = 'texture' | 'sign-background-material-instance'
 
 export interface RawAssetPackConfig {
 	modRef?: string
@@ -17,6 +20,7 @@ export interface RawAssetPackConfig {
 	source?: RawSourceConfig
 	output?: RawOutputConfig
 	unreal?: RawUnrealConfig
+	background?: RawBackgroundConfig
 	generation?: RawGenerationConfig
 }
 
@@ -60,6 +64,34 @@ export interface RawUnrealConfig {
 	textureSettings?: Partial<TextureSettings>
 }
 
+export interface RawBackgroundConfig {
+	type?: BackgroundType
+	mode?: SignImageBackgroundMode
+	tileWidth?: number
+	tileHeight?: number
+	baseTileHeight?: number
+	targetAspect?: number | string
+	fitScale?: number
+	refractionDepthBias?: number
+	materialDir?: string
+	materialAssetPrefix?: string
+	parentMaterialObjectPath?: string
+	textureParameter?: string
+	variants?: RawSignImageBackgroundVariant[]
+}
+
+export interface RawSignImageBackgroundVariant {
+	suffix?: string
+	displayNameSuffix?: string
+	mode?: SignImageBackgroundMode
+	tileWidth?: number
+	tileHeight?: number
+	baseTileHeight?: number
+	targetAspect?: number | string
+	fitScale?: number
+	refractionDepthBias?: number
+}
+
 export interface RawGenerationConfig {
 	tool?: string
 	version?: string
@@ -82,6 +114,7 @@ export interface AssetPackConfig {
 	source: SourceConfig
 	output: OutputConfig
 	unreal: UnrealConfig
+	background: BackgroundConfig
 	generation: GenerationConfig
 }
 
@@ -124,6 +157,40 @@ export interface UnrealConfig {
 	textureSettings: TextureSettings
 }
 
+export type BackgroundConfig = NoBackgroundConfig | SignImageBackgroundConfig
+
+export interface NoBackgroundConfig {
+	type: 'none'
+}
+
+export interface SignImageBackgroundConfig {
+	type: 'sign-image'
+	mode: SignImageBackgroundMode
+	tileWidth: number | null
+	tileHeight: number | null
+	baseTileHeight: number
+	targetAspect: number | null
+	fitScale: number
+	refractionDepthBias: number
+	materialDir: string
+	materialAssetPrefix: string
+	parentMaterialObjectPath: string
+	textureParameter: string
+	variants: SignImageBackgroundVariant[]
+}
+
+export interface SignImageBackgroundVariant {
+	suffix: string | null
+	displayNameSuffix: string | null
+	mode: SignImageBackgroundMode
+	tileWidth: number | null
+	tileHeight: number | null
+	baseTileHeight: number
+	targetAspect: number | null
+	fitScale: number
+	refractionDepthBias: number
+}
+
 export interface GenerationConfig {
 	tool: string
 	version: string
@@ -134,6 +201,8 @@ export interface TextureSettings {
 	TextureGroup: string
 	CompressionSettings: string
 	sRGB: boolean
+	AddressX?: string
+	AddressY?: string
 }
 
 export interface AssetPackOverrides {
@@ -157,9 +226,14 @@ export interface SourceAsset {
 
 export interface AssetRecord extends SourceAsset {
 	id: number
+	sourceSlug: string
 	textureAssetName: string
 	textureObjectPath: string
+	iconAssetName: string
+	iconObjectPath: string
+	iconObjectType: IconObjectType
 	displayName: string
+	backgroundVariant: SignImageBackgroundVariant | null
 }
 
 export interface IdLockAsset {
@@ -188,7 +262,11 @@ export interface ParsedIdLock {
 export interface BaseAssetManifestEntry {
 	ID: number
 	slug: string
+	sourceSlug?: string
 	textureAssetName: string
+	iconAssetName?: string
+	iconObjectPath?: string
+	iconObjectType?: IconObjectType
 	metadataPath: string
 	displayName: string
 }
@@ -221,6 +299,7 @@ export interface AssetPackManifest {
 export interface AssetMetadataFile {
 	source: {
 		slug: string
+		sourceSlug: string
 		sourcePath: string
 		sourceStyle: string
 		color: string
@@ -231,10 +310,21 @@ export interface AssetMetadataFile {
 		textureSource: TextureSource
 		textureAssetName: string
 		expectedTextureObjectPath: string
+		iconObjectType: IconObjectType
+		iconAssetName: string
+		expectedIconObjectPath: string
+		materialInstance: MaterialInstanceMetadata | null
 		iconLibraryAssetPath: string
 		iconLibraryEntry: IconLibraryEntry
 		textureSettings: TextureSettings
 	}
+}
+
+export interface MaterialInstanceMetadata {
+	parentMaterialObjectPath: string
+	materialObjectPath: string
+	textureParameter: string
+	scalarParameters: Record<string, number>
 }
 
 export interface IconLibraryEntry {

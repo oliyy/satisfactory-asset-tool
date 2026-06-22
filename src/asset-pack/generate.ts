@@ -6,7 +6,7 @@ import { listAvailableSourceAssets } from '../adapters/source-folders.js'
 import { assertFile, readJsonIfExists, toPortablePath } from '../core/fs.js'
 import { applyIdLock, assertNoDuplicates, buildIdLock, MAX_LOCAL_ICON_ID, parseIdLock } from '../core/ids.js'
 import { normalizeAssetSlug, toDisplayName, toPascalCase } from '../core/naming.js'
-import { validateWhiteRgbaPng } from '../core/png.js'
+import { cropCoverPng, readPngDimensions, validateBackgroundPng, validateWhiteRgbaPng } from '../core/png.js'
 import { normalizeSvgColor, renderPng } from '../core/svg.js'
 import type {
 	AssetManifestEntry,
@@ -15,7 +15,10 @@ import type {
 	AssetPackManifest,
 	AssetRecord,
 	GeneratedAssetManifestEntry,
+	IconObjectType,
+	MaterialInstanceMetadata,
 	ParsedIdLock,
+	SignImageBackgroundVariant,
 	SourceAsset,
 	SourceCatalog,
 	TextureSource,
@@ -42,6 +45,15 @@ export interface AssetPackGenerateResult {
 }
 
 const DEFAULT_ASSET = 'engine'
+const SIGN_BACKGROUND_TEXTURE_SETTINGS = {
+	AddressX: 'Wrap',
+	AddressY: 'Wrap',
+} as const
+
+interface PngDimensions {
+	width: number
+	height: number
+}
 
 export async function generateAssetPack(config: AssetPackConfig, options: AssetPackGenerateOptions = {}): Promise<AssetPackGenerateResult> {
 	const resolvedOptions = normalizeOptions(config, options)
@@ -79,11 +91,16 @@ export async function validateExistingAssetPack(config: AssetPackConfig, options
 	const records = manifest.assets.map((asset) => ({
 		id: asset.ID,
 		slug: asset.slug,
+		sourceSlug: asset.sourceSlug ?? asset.slug,
 		sourcePath: manifestAssetTextureObjectPath(config, asset),
 		sourceType: manifestAssetTextureSource(asset) === 'unreal-existing' ? ('unreal-texture' as const) : ('svg' as const),
 		textureAssetName: asset.textureAssetName,
 		textureObjectPath: manifestAssetTextureObjectPath(config, asset),
+		iconAssetName: asset.iconAssetName ?? asset.textureAssetName,
+		iconObjectPath: asset.iconObjectPath ?? manifestAssetTextureObjectPath(config, asset),
+		iconObjectType: asset.iconObjectType ?? ('texture' as const),
 		displayName: asset.displayName,
+		backgroundVariant: null,
 	}))
 
 	assertNoDuplicates(records)
@@ -167,6 +184,21 @@ function assertManifestAssetShape(asset: unknown, label: string, config: AssetPa
 	if (!isNonEmptyString(candidate.textureAssetName)) {
 		throw new Error(`${label}.textureAssetName must be a non-empty string`)
 	}
+	if (candidate.iconAssetName !== undefined && !isNonEmptyString(candidate.iconAssetName)) {
+		throw new Error(`${label}.iconAssetName must be a non-empty string when present`)
+	}
+	if (candidate.iconObjectPath !== undefined && !isNonEmptyString(candidate.iconObjectPath)) {
+		throw new Error(`${label}.iconObjectPath must be a non-empty string when present`)
+	}
+	const iconObjectType = assertManifestIconObjectType(candidate as AssetManifestEntry)
+	if (iconObjectType === 'sign-background-material-instance') {
+		if (!isNonEmptyString(candidate.iconAssetName)) {
+			throw new Error(`${label}.iconAssetName is required for sign-background-material-instance assets`)
+		}
+		if (!isNonEmptyString(candidate.iconObjectPath)) {
+			throw new Error(`${label}.iconObjectPath is required for sign-background-material-instance assets`)
+		}
+	}
 	if (!isNonEmptyString(candidate.metadataPath)) {
 		throw new Error(`${label}.metadataPath must be a non-empty string`)
 	}
@@ -211,19 +243,37 @@ async function validateManifestAsset(
 	if (metadata.unreal.textureSource !== textureSource) {
 		throw new Error(`${asset.metadataPath} textureSource ${metadata.unreal.textureSource} does not match manifest`)
 	}
+	const expectedIconObjectType = manifestAssetIconObjectType(asset)
+	if (metadata.unreal.iconObjectType !== expectedIconObjectType) {
+		throw new Error(`${asset.metadataPath} iconObjectType ${metadata.unreal.iconObjectType} does not match manifest`)
+	}
+	const expectedIconAssetName = asset.iconAssetName ?? asset.textureAssetName
+	if (metadata.unreal.iconAssetName !== expectedIconAssetName) {
+		throw new Error(`${asset.metadataPath} iconAssetName does not match manifest`)
+	}
 	if (metadata.unreal.expectedTextureObjectPath !== manifestAssetTextureObjectPath(config, asset)) {
 		throw new Error(`${asset.metadataPath} expectedTextureObjectPath does not match manifest`)
 	}
-	if (entry.Texture !== metadata.unreal.expectedTextureObjectPath) {
-		throw new Error(`${asset.metadataPath} icon library Texture does not match expectedTextureObjectPath`)
+	const expectedIconObjectPath = asset.iconObjectPath ?? metadata.unreal.expectedTextureObjectPath
+	if (metadata.unreal.expectedIconObjectPath !== expectedIconObjectPath) {
+		throw new Error(`${asset.metadataPath} expectedIconObjectPath does not match manifest`)
 	}
+	if (entry.Texture !== metadata.unreal.expectedIconObjectPath) {
+		throw new Error(`${asset.metadataPath} icon library Texture does not match expectedIconObjectPath`)
+	}
+	validateIconObjectMetadata(asset, metadata, expectedIconObjectType)
 
 	if (textureSource === 'generated') {
 		const pngPath = path.resolve(metadataDir, (asset as GeneratedAssetManifestEntry).texturePath)
 		await assertFile(pngPath)
 	}
 
-	if (textureSource === 'generated' && options.validatePng) {
+	if (textureSource === 'generated' && options.validatePng && metadata.unreal.iconObjectType === 'sign-background-material-instance') {
+		const pngPath = path.resolve(metadataDir, (asset as GeneratedAssetManifestEntry).texturePath)
+		await validateBackgroundPng(pngPath)
+	}
+
+	if (textureSource === 'generated' && options.validatePng && metadata.unreal.iconObjectType !== 'sign-background-material-instance') {
 		const pngPath = path.resolve(metadataDir, (asset as GeneratedAssetManifestEntry).texturePath)
 		await validateWhiteRgbaPng(pngPath, manifest.size)
 	}
@@ -259,7 +309,7 @@ function normalizeOptions(
 		validateOnly: options.validateOnly ?? false,
 		validatePng: options.validatePng ?? true,
 		idLock: options.idLock ?? true,
-		writePluginIcon: options.writePluginIcon ?? config.source.type !== 'unreal-texture-list',
+		writePluginIcon: options.writePluginIcon ?? (config.source.type !== 'unreal-texture-list' && config.background.type !== 'sign-image'),
 		limit: options.limit ?? null,
 	}
 }
@@ -276,28 +326,77 @@ function selectAssets(
 		throw new Error(`Missing source file for asset(s): ${missing.join(', ')}`)
 	}
 
-	const lastId = config.idBase + selected.length - 1
-	if (lastId > MAX_LOCAL_ICON_ID) {
-		throw new Error(
-			`Selected ${selected.length} asset(s) with idBase ${config.idBase} would end at ${lastId}; maximum supported local ID is ${MAX_LOCAL_ICON_ID}`,
-		)
-	}
-
-	return selected.map((slug, index) => {
+	const selectedRecordInputs = selected.flatMap((slug) => {
 		const sourceAsset = availableAssets.get(slug)
 		if (!sourceAsset) {
 			throw new Error(`Missing selected source asset: ${slug}`)
 		}
-
-		const textureAssetName = `${config.assetPrefix}${toPascalCase(slug)}`
-		return {
-			...sourceAsset,
-			id: config.idBase + index,
-			textureAssetName,
-			textureObjectPath: sourceAsset.textureObjectPath ?? textureObjectPath(config, textureAssetName),
-			displayName: sourceAsset.displayName ?? toDisplayName(slug),
-		}
+		return recordsForSourceAsset(config, sourceAsset)
 	})
+
+	const lastId = config.idBase + selectedRecordInputs.length - 1
+	if (lastId > MAX_LOCAL_ICON_ID) {
+		throw new Error(
+			`Selected ${selectedRecordInputs.length} asset(s) with idBase ${config.idBase} would end at ${lastId}; maximum supported local ID is ${MAX_LOCAL_ICON_ID}`,
+		)
+	}
+
+	return selectedRecordInputs.map((record, index) => ({ ...record, id: config.idBase + index }))
+}
+
+function recordsForSourceAsset(config: AssetPackConfig, sourceAsset: SourceAsset): Omit<AssetRecord, 'id'>[] {
+	if (config.background.type !== 'sign-image') {
+		const textureAssetName = `${config.assetPrefix}${toPascalCase(sourceAsset.slug)}`
+		const texturePath = sourceAsset.textureObjectPath ?? textureObjectPath(config, textureAssetName)
+		return [
+			{
+				...sourceAsset,
+				sourceSlug: sourceAsset.slug,
+				textureAssetName,
+				textureObjectPath: texturePath,
+				iconAssetName: textureAssetName,
+				iconObjectPath: texturePath,
+				iconObjectType: 'texture',
+				displayName: sourceAsset.displayName ?? toDisplayName(sourceAsset.slug),
+				backgroundVariant: null,
+			},
+		]
+	}
+
+	return config.background.variants.map((variant) => signImageRecordForVariant(config, sourceAsset, variant))
+}
+
+function signImageRecordForVariant(
+	config: AssetPackConfig,
+	sourceAsset: SourceAsset,
+	variant: SignImageBackgroundVariant,
+): Omit<AssetRecord, 'id'> {
+	if (config.background.type !== 'sign-image') {
+		throw new Error('signImageRecordForVariant called without sign-image background config')
+	}
+	if (sourceAsset.sourceType === 'unreal-texture' && variant.mode === 'cover') {
+		throw new Error(`Background cover mode requires a local PNG/SVG source: ${sourceAsset.slug}`)
+	}
+
+	const slug = variant.suffix ? `${sourceAsset.slug}-${variant.suffix}` : sourceAsset.slug
+	const textureAssetName = `${config.assetPrefix}${toPascalCase(slug)}`
+	const iconAssetName = `${config.background.materialAssetPrefix}${toPascalCase(slug)}`
+	const texturePath = sourceAsset.textureObjectPath ?? textureObjectPath(config, textureAssetName)
+	const baseDisplayName = sourceAsset.displayName ?? toDisplayName(sourceAsset.slug)
+	const displayName = variant.displayNameSuffix ? `${baseDisplayName} ${variant.displayNameSuffix}` : toDisplayName(slug)
+
+	return {
+		...sourceAsset,
+		slug,
+		sourceSlug: sourceAsset.slug,
+		textureAssetName,
+		textureObjectPath: texturePath,
+		iconAssetName,
+		iconObjectPath: materialObjectPath(config, iconAssetName),
+		iconObjectType: 'sign-background-material-instance',
+		displayName,
+		backgroundVariant: variant,
+	}
 }
 
 function selectedAssetSlugs(
@@ -433,22 +532,42 @@ async function processRecord(config: AssetPackConfig, record: AssetRecord, optio
 		return
 	}
 
+	const coverAspect = coverTargetAspect(record)
 	if (record.sourceType === 'svg') {
 		const sourceSvg = await readFile(record.sourcePath, 'utf8')
 		const whiteSvg = normalizeSvgColor(sourceSvg, config.color)
 		const svgOutPath = path.join(config.output.svgDir, `${record.textureAssetName}.svg`)
 		await writeFile(svgOutPath, `${whiteSvg.trimEnd()}\n`, 'utf8')
 		await renderPng(svgOutPath, pngOutPath, config.size)
+		if (coverAspect !== null) {
+			await cropCoverPng(pngOutPath, pngOutPath, coverAspect)
+		}
+	} else if (coverAspect !== null) {
+		await cropCoverPng(record.sourcePath, pngOutPath, coverAspect)
 	} else {
 		await copyFile(record.sourcePath, pngOutPath)
 	}
 
-	if (options.validatePng) {
-		await validateWhiteRgbaPng(pngOutPath, config.size)
+	const pngDimensions = await validateOrReadPngDimensions(config, record, pngOutPath, options.validatePng)
+
+	const metadata = buildAssetMetadata(config, record, pngDimensions)
+	await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8')
+}
+
+async function validateOrReadPngDimensions(
+	config: AssetPackConfig,
+	record: AssetRecord,
+	pngPath: string,
+	validatePng: boolean,
+): Promise<PngDimensions | undefined> {
+	if (record.iconObjectType === 'sign-background-material-instance') {
+		return validatePng ? validateBackgroundPng(pngPath) : readPngDimensions(pngPath)
 	}
 
-	const metadata = buildAssetMetadata(config, record)
-	await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8')
+	if (validatePng) {
+		await validateWhiteRgbaPng(pngPath, config.size)
+	}
+	return undefined
 }
 
 async function writePluginIcon(config: AssetPackConfig, pluginIconRecord: AssetRecord): Promise<void> {
@@ -477,14 +596,20 @@ function printRecords(records: AssetRecord[]): void {
 	})
 }
 
-export function buildAssetMetadata(config: AssetPackConfig, record: AssetRecord): AssetMetadataFile {
+export function buildAssetMetadata(config: AssetPackConfig, record: AssetRecord, pngDimensions?: PngDimensions): AssetMetadataFile {
 	const sourcePath =
 		record.sourceType === 'unreal-texture' ? record.textureObjectPath : toPortablePath(path.relative(config.root, record.sourcePath), path)
 	const textureSource = textureSourceForRecord(record)
+	const materialInstance = buildMaterialInstanceMetadata(config, record, pngDimensions)
+	const textureSettings =
+		record.iconObjectType === 'sign-background-material-instance'
+			? { ...config.unreal.textureSettings, ...SIGN_BACKGROUND_TEXTURE_SETTINGS }
+			: config.unreal.textureSettings
 
 	return {
 		source: {
 			slug: record.slug,
+			sourceSlug: record.sourceSlug,
 			sourcePath,
 			sourceStyle: config.source.styleName,
 			color: config.color,
@@ -495,21 +620,83 @@ export function buildAssetMetadata(config: AssetPackConfig, record: AssetRecord)
 			textureSource,
 			textureAssetName: record.textureAssetName,
 			expectedTextureObjectPath: record.textureObjectPath,
+			iconObjectType: record.iconObjectType,
+			iconAssetName: record.iconAssetName,
+			expectedIconObjectPath: record.iconObjectPath,
+			materialInstance,
 			iconLibraryAssetPath: iconLibraryAssetPath(config),
 			iconLibraryEntry: {
 				ID: record.id,
-				Texture: record.textureObjectPath,
+				Texture: record.iconObjectPath,
 				ItemDescriptor: null,
-				DisplayNameOverride: record.sourceType === 'unreal-texture',
+				DisplayNameOverride: record.sourceType === 'unreal-texture' || record.iconObjectType === 'sign-background-material-instance',
 				IconName: record.displayName,
 				IconType: config.iconType,
 				Hidden: false,
 				SearchOnly: false,
 				Animated: false,
 			},
-			textureSettings: config.unreal.textureSettings,
+			textureSettings,
 		},
 	}
+}
+
+function buildMaterialInstanceMetadata(
+	config: AssetPackConfig,
+	record: AssetRecord,
+	pngDimensions: PngDimensions | undefined,
+): MaterialInstanceMetadata | null {
+	if (config.background.type !== 'sign-image' || !record.backgroundVariant) {
+		return null
+	}
+
+	return {
+		parentMaterialObjectPath: config.background.parentMaterialObjectPath,
+		materialObjectPath: record.iconObjectPath,
+		textureParameter: config.background.textureParameter,
+		scalarParameters: signBackgroundScalarParameters(record.backgroundVariant, pngDimensions, record.slug),
+	}
+}
+
+function signBackgroundScalarParameters(
+	variant: SignImageBackgroundVariant,
+	pngDimensions: PngDimensions | undefined,
+	slug: string,
+): Record<string, number> {
+	const dimensions = backgroundTileDimensions(variant, pngDimensions, slug)
+	return {
+		FillMode: variant.mode === 'tile' ? 0 : 1,
+		FitScale: variant.fitScale,
+		TileWidth: dimensions.width,
+		TileHeight: dimensions.height,
+		RefractionDepthBias: variant.refractionDepthBias,
+	}
+}
+
+function backgroundTileDimensions(
+	variant: SignImageBackgroundVariant,
+	pngDimensions: PngDimensions | undefined,
+	slug: string,
+): PngDimensions {
+	if (variant.tileWidth !== null && variant.tileHeight !== null) {
+		return { width: variant.tileWidth, height: variant.tileHeight }
+	}
+
+	if (variant.mode === 'tile') {
+		return { width: variant.tileWidth ?? 400, height: variant.tileHeight ?? 400 }
+	}
+
+	const aspect = variant.targetAspect ?? (pngDimensions ? pngDimensions.width / pngDimensions.height : null)
+	if (aspect === null) {
+		throw new Error(`Background ${slug} requires tileWidth/tileHeight or targetAspect because source dimensions are unavailable`)
+	}
+
+	if (variant.tileWidth !== null) {
+		return { width: variant.tileWidth, height: variant.tileWidth / aspect }
+	}
+
+	const height = variant.tileHeight ?? variant.baseTileHeight
+	return { width: height * aspect, height }
 }
 
 export function buildManifest(config: AssetPackConfig, records: AssetRecord[]): AssetPackManifest {
@@ -546,7 +733,11 @@ function buildGeneratedManifestAsset(config: AssetPackConfig, record: AssetRecor
 	return {
 		ID: record.id,
 		slug: record.slug,
+		sourceSlug: record.sourceSlug,
 		textureAssetName: record.textureAssetName,
+		iconAssetName: record.iconAssetName,
+		iconObjectPath: record.iconObjectPath,
+		iconObjectType: record.iconObjectType,
 		textureSource: 'generated',
 		texturePath,
 		metadataPath: `${record.textureAssetName}.json`,
@@ -558,7 +749,11 @@ function buildUnrealExistingManifestAsset(record: AssetRecord): UnrealExistingAs
 	return {
 		ID: record.id,
 		slug: record.slug,
+		sourceSlug: record.sourceSlug,
 		textureAssetName: record.textureAssetName,
+		iconAssetName: record.iconAssetName,
+		iconObjectPath: record.iconObjectPath,
+		iconObjectType: record.iconObjectType,
 		textureSource: 'unreal-existing',
 		textureObjectPath: record.textureObjectPath,
 		metadataPath: `${record.textureAssetName}.json`,
@@ -607,12 +802,15 @@ function buildAssetPackMetadataEntry(config: AssetPackConfig, record: AssetRecor
 
 	return {
 		slug: record.slug,
-		sourceSlug: catalogResult?.sourceSlug ?? record.slug,
+		sourceSlug: catalogResult?.sourceSlug ?? record.sourceSlug,
 		displayName: record.displayName,
 		primaryCategory: catalogEntry?.categories[0] ?? null,
 		categories: catalogEntry?.categories ?? [],
 		searchTerms: catalogEntry ? cleanSearchTerms(catalogEntry.tags) : [],
-		texturePath: record.textureObjectPath,
+		texturePath: record.iconObjectPath,
+		sourceTexturePath: record.textureObjectPath,
+		iconObjectPath: record.iconObjectPath,
+		iconObjectType: record.iconObjectType,
 	}
 }
 
@@ -693,16 +891,79 @@ function textureObjectPath(config: AssetPackConfig, textureAssetName: string): s
 	return `/${config.modRef}/${config.unreal.textureDir}/${textureAssetName}.${textureAssetName}`
 }
 
+function materialObjectPath(config: AssetPackConfig, materialAssetName: string): string {
+	const materialDir = config.background.type === 'sign-image' ? config.background.materialDir : config.unreal.textureDir
+	return `/${config.modRef}/${materialDir}/${materialAssetName}.${materialAssetName}`
+}
+
 function iconLibraryAssetPath(config: AssetPackConfig): string {
 	return `/${config.modRef}/${config.unreal.iconLibraryDir}/${config.unreal.iconLibraryName}.${config.unreal.iconLibraryName}`
+}
+
+function coverTargetAspect(record: AssetRecord): number | null {
+	const variant = record.backgroundVariant
+	if (!variant || variant.mode !== 'cover') {
+		return null
+	}
+	if (variant.targetAspect !== null) {
+		return variant.targetAspect
+	}
+	if (variant.tileWidth !== null && variant.tileHeight !== null) {
+		return variant.tileWidth / variant.tileHeight
+	}
+	throw new Error(`Background cover mode requires targetAspect or tileWidth/tileHeight: ${record.slug}`)
 }
 
 function textureSourceForRecord(record: AssetRecord): TextureSource {
 	return record.sourceType === 'unreal-texture' ? 'unreal-existing' : 'generated'
 }
 
+function validateIconObjectMetadata(
+	asset: AssetPackManifest['assets'][number],
+	metadata: AssetMetadataFile,
+	expectedIconObjectType: IconObjectType,
+): void {
+	if (expectedIconObjectType === 'sign-background-material-instance') {
+		validateMaterialInstanceMetadata(asset, metadata)
+		return
+	}
+
+	if (metadata.unreal.materialInstance !== null) {
+		throw new Error(`${asset.metadataPath} materialInstance must be null for texture icon assets`)
+	}
+	if (metadata.unreal.expectedIconObjectPath !== metadata.unreal.expectedTextureObjectPath) {
+		throw new Error(`${asset.metadataPath} texture icon assets must use the texture object as expectedIconObjectPath`)
+	}
+}
+
+function validateMaterialInstanceMetadata(asset: AssetPackManifest['assets'][number], metadata: AssetMetadataFile): void {
+	const materialInstance = metadata.unreal.materialInstance
+	if (!materialInstance || typeof materialInstance !== 'object') {
+		throw new Error(`${asset.metadataPath} requires materialInstance metadata for sign-background-material-instance assets`)
+	}
+	if (!isNonEmptyString(materialInstance.parentMaterialObjectPath)) {
+		throw new Error(`${asset.metadataPath} materialInstance.parentMaterialObjectPath must be a non-empty string`)
+	}
+	if (materialInstance.materialObjectPath !== metadata.unreal.expectedIconObjectPath) {
+		throw new Error(`${asset.metadataPath} materialInstance.materialObjectPath does not match expectedIconObjectPath`)
+	}
+	if (!isNonEmptyString(materialInstance.textureParameter)) {
+		throw new Error(`${asset.metadataPath} materialInstance.textureParameter must be a non-empty string`)
+	}
+	if (!materialInstance.scalarParameters || typeof materialInstance.scalarParameters !== 'object') {
+		throw new Error(`${asset.metadataPath} materialInstance.scalarParameters must be an object`)
+	}
+	if (metadata.unreal.iconLibraryEntry.IconType !== 'EIconType::ESIT_Material') {
+		throw new Error(`${asset.metadataPath} sign-background material instances require IconType Material`)
+	}
+}
+
 function manifestAssetTextureSource(asset: AssetManifestEntry): TextureSource {
 	return assertManifestTextureSource(asset)
+}
+
+function manifestAssetIconObjectType(asset: AssetManifestEntry): IconObjectType {
+	return assertManifestIconObjectType(asset)
 }
 
 function manifestAssetTextureObjectPath(config: AssetPackConfig, asset: AssetManifestEntry): string {
@@ -733,6 +994,20 @@ function assertManifestTextureSource(asset: AssetManifestEntry): TextureSource {
 	}
 
 	throw new Error(`${label} has unsupported textureSource: ${String(textureSource)}`)
+}
+
+function assertManifestIconObjectType(asset: AssetManifestEntry): IconObjectType {
+	const iconObjectType = (asset as Partial<AssetManifestEntry>).iconObjectType
+	const label = `manifest asset ${asset.slug || asset.textureAssetName || '<unknown>'}`
+
+	if (iconObjectType === undefined) {
+		return 'texture'
+	}
+	if (iconObjectType === 'texture' || iconObjectType === 'sign-background-material-instance') {
+		return iconObjectType
+	}
+
+	throw new Error(`${label} has unsupported iconObjectType: ${String(iconObjectType)}`)
 }
 
 function isNonEmptyString(value: unknown): value is string {

@@ -22,13 +22,13 @@ def icon_type_value(icon_type_name):
     return enum_value(icon_enum, candidates)
 
 
-def create_icon_data(entry, texture, warn):
+def create_icon_data(entry, icon_object, warn):
     if not hasattr(unreal, "IconData"):
         raise RuntimeError("FactoryGame IconData struct is not available to Python")
 
     icon_data = unreal.IconData()
     set_first_property(icon_data, ["id", "ID"], int(entry["ID"]))
-    set_first_property(icon_data, ["texture", "Texture"], texture)
+    set_first_property(icon_data, ["texture", "Texture"], icon_object)
     try_set_first_property(icon_data, ["item_descriptor", "ItemDescriptor"], None, warn)
     set_first_property(icon_data, ["display_name_override", "DisplayNameOverride"], bool(entry["DisplayNameOverride"]))
     set_first_property(icon_data, ["icon_name", "IconName"], text_value(entry["IconName"]))
@@ -39,7 +39,7 @@ def create_icon_data(entry, texture, warn):
     return icon_data
 
 
-def create_icon_library(manifest, metadata_entries, textures, warn, log):
+def create_icon_library(manifest, metadata_entries, icon_objects, warn, log):
     package_path, asset_name = split_object_path(manifest["iconLibraryAssetPath"])
     ensure_directory(package_path)
 
@@ -54,8 +54,8 @@ def create_icon_library(manifest, metadata_entries, textures, warn, log):
     icon_data_entries = []
     for metadata in metadata_entries:
         entry = metadata["unreal"]["iconLibraryEntry"]
-        texture_name = metadata["unreal"]["textureAssetName"]
-        icon_data_entries.append(create_icon_data(entry, textures[texture_name], warn))
+        icon_asset_name = metadata["unreal"].get("iconAssetName", metadata["unreal"]["textureAssetName"])
+        icon_data_entries.append(create_icon_data(entry, icon_objects[icon_asset_name], warn))
 
     set_first_property(icon_library, ["m_icon_data", "mIconData"], icon_data_entries)
     try_set_first_property(icon_library, ["m_custom_icon_data", "mCustomIconData"], [], warn)
@@ -63,4 +63,3 @@ def create_icon_library(manifest, metadata_entries, textures, warn, log):
     unreal.EditorAssetLibrary.save_loaded_asset(icon_library)
     log(f"Created/updated icon library: {package_path}/{asset_name} with {len(icon_data_entries)} icon(s)")
     return icon_library
-

@@ -1,6 +1,6 @@
 {
 	"name": "@oliyy_/satisfactory-asset-tool",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"description": "Node-first tooling for generating Satisfactory asset-pack source files and importing them into Unreal.",
 	"license": "MIT",
 	"type": "module",

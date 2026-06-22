@@ -9,6 +9,7 @@ import unreal
 
 from asset_tool.game_feature import create_game_feature_data
 from asset_tool.icon_library import create_icon_library
+from asset_tool.material_instance import create_or_update_material_instance
 from asset_tool.texture_import import import_texture
 
 
@@ -122,6 +123,7 @@ def validate_entries(entries):
 
     seen_ids = {}
     seen_assets = {}
+    seen_icon_objects = {}
     seen_names = {}
 
     for entry in entries:
@@ -130,6 +132,7 @@ def validate_entries(entries):
         icon_entry = unreal_data["iconLibraryEntry"]
         icon_id = int(icon_entry["ID"])
         asset_name = unreal_data["textureAssetName"]
+        icon_asset_name = unreal_data.get("iconAssetName", asset_name)
         icon_name = str(icon_entry["IconName"])
         source_png_path = entry["sourcePngPath"]
         texture_source = entry["textureSource"]
@@ -138,6 +141,8 @@ def validate_entries(entries):
             raise RuntimeError(f"Duplicate asset ID {icon_id}: {seen_ids[icon_id]} and {asset_name}")
         if asset_name.lower() in seen_assets:
             raise RuntimeError(f"Duplicate texture asset name {asset_name}: {seen_assets[asset_name.lower()]}")
+        if icon_asset_name.lower() in seen_icon_objects:
+            raise RuntimeError(f"Duplicate icon asset name {icon_asset_name}: {seen_icon_objects[icon_asset_name.lower()]}")
         if icon_name.lower() in seen_names:
             raise RuntimeError(f"Duplicate icon display name {icon_name}: {seen_names[icon_name.lower()]}")
         if texture_source not in {"generated", "unreal-existing"}:
@@ -149,6 +154,7 @@ def validate_entries(entries):
 
         seen_ids[icon_id] = asset_name
         seen_assets[asset_name.lower()] = asset_name
+        seen_icon_objects[icon_asset_name.lower()] = asset_name
         seen_names[icon_name.lower()] = asset_name
 
 
@@ -165,6 +171,15 @@ def load_existing_texture(metadata):
     return texture
 
 
+def resolve_icon_object(metadata, texture, warn):
+    icon_object_type = metadata["unreal"].get("iconObjectType", "texture")
+    if icon_object_type == "texture":
+        return texture
+    if icon_object_type == "sign-background-material-instance":
+        return create_or_update_material_instance(metadata, texture, warn)
+    raise RuntimeError(f"Unsupported iconObjectType for {metadata['unreal']['textureAssetName']}: {icon_object_type}")
+
+
 def main():
     options = parse_options()
     manifest, entries = load_entries(options)
@@ -179,21 +194,22 @@ def main():
             log(f"DRY_RUN omitted {len(entries) - 20} additional asset(s)")
         return
 
-    textures = {}
+    icon_objects = {}
     for index, entry in enumerate(entries, start=1):
         if entry["textureSource"] == "unreal-existing":
             texture = load_existing_texture(entry["metadata"])
         else:
             texture = import_texture(entry["metadata"], entry["sourcePngPath"], warn)
 
-        texture_name = entry["metadata"]["unreal"]["textureAssetName"]
-        textures[texture_name] = texture
+        icon_object = resolve_icon_object(entry["metadata"], texture, warn)
+        icon_asset_name = entry["metadata"]["unreal"].get("iconAssetName", entry["metadata"]["unreal"]["textureAssetName"])
+        icon_objects[icon_asset_name] = icon_object
 
         if index % 100 == 0 or index == len(entries):
             verb = "Loaded" if entry["textureSource"] == "unreal-existing" else "Imported"
-            log(f"{verb} {index}/{len(entries)} texture(s); latest={texture_name}")
+            log(f"{verb} {index}/{len(entries)} asset(s); latest={icon_asset_name}")
 
-    create_icon_library(manifest, [entry["metadata"] for entry in entries], textures, warn, log)
+    create_icon_library(manifest, [entry["metadata"] for entry in entries], icon_objects, warn, log)
     create_game_feature_data(manifest, warn, log)
     log("Done. Save all assets, then package with Alpakit when no other build is running.")
 

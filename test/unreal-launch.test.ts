@@ -249,6 +249,9 @@ function minimalConfig(values: { root: string; modRef: string }): AssetPackConfi
 				sRGB: true,
 			},
 		},
+		background: {
+			type: 'none',
+		},
 		generation: {
 			tool: 'test',
 			version: '0.0.0',

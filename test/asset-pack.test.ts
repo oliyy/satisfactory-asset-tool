@@ -6,6 +6,7 @@ import { test } from 'node:test'
 
 import { generateAssetPack, validateExistingAssetPack } from '../src/asset-pack/generate.js'
 import { loadAssetPackConfig } from '../src/core/config.js'
+import { readPngDimensions, writePngRgba } from '../src/core/png.js'
 import type { AssetPackManifest } from '../src/core/types.js'
 
 const fixtureRoot = path.resolve('test/fixtures/phosphor-mini')
@@ -220,7 +221,11 @@ test('generates and validates an Unreal texture list pack without local PNGs', a
 	assert.deepEqual(manifest.assets[0], {
 		ID: 61000,
 		slug: 'portable-miner',
+		sourceSlug: 'portable-miner',
 		textureAssetName: 'T_Existing_PortableMiner',
+		iconAssetName: 'T_Existing_PortableMiner',
+		iconObjectPath: portableMinerPath,
+		iconObjectType: 'texture',
 		textureSource: 'unreal-existing',
 		textureObjectPath: portableMinerPath,
 		metadataPath: 'T_Existing_PortableMiner.json',
@@ -229,17 +234,44 @@ test('generates and validates an Unreal texture list pack without local PNGs', a
 	await assert.rejects(readFile(path.join(outputRoot, 'SourceArt/Textures/T_Existing_PortableMiner.png'), 'utf8'), /ENOENT/)
 	await assert.rejects(readFile(path.join(outputRoot, 'Resources/Icon128.png'), 'utf8'), /ENOENT/)
 
-	const metadata = JSON.parse(await readFile(path.join(outputRoot, 'SourceArt/Metadata/T_Existing_PortableMiner.json'), 'utf8'))
+	const metadataPath = path.join(outputRoot, 'SourceArt/Metadata/T_Existing_PortableMiner.json')
+	const metadata = JSON.parse(await readFile(metadataPath, 'utf8'))
 	assert.equal(metadata.unreal.textureSource, 'unreal-existing')
 	assert.equal(metadata.unreal.expectedTextureObjectPath, portableMinerPath)
+	assert.equal(metadata.unreal.expectedIconObjectPath, portableMinerPath)
+	assert.equal(metadata.unreal.iconObjectType, 'texture')
 	assert.equal(metadata.unreal.iconLibraryEntry.Texture, portableMinerPath)
 	assert.equal(metadata.unreal.iconLibraryEntry.DisplayNameOverride, true)
 
 	const sidecar = JSON.parse(await readFile(path.join(outputRoot, 'Metadata/ExistingTexturePack_AssetMetadata.json'), 'utf8'))
 	assert.equal(sidecar.source.style, '')
+	assert.equal(sidecar.generation.version, await packageVersion(path.resolve('package.json')))
 	assert.equal(sidecar.assets['61000'].texturePath, portableMinerPath)
 
 	await validateExistingAssetPack(config)
+
+	await writeFile(
+		metadataPath,
+		`${JSON.stringify(
+			{
+				...metadata,
+				unreal: {
+					...metadata.unreal,
+					materialInstance: {
+						parentMaterialObjectPath: '/Game/Parent.Parent',
+						materialObjectPath: portableMinerPath,
+						textureParameter: 'Texture',
+						scalarParameters: {},
+					},
+				},
+			},
+			null,
+			2,
+		)}\n`,
+		'utf8',
+	)
+	await assert.rejects(validateExistingAssetPack(config), /materialInstance must be null for texture icon assets/)
+	await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8')
 
 	await writeManifest(manifestPath, { ...manifest, schemaVersion: 2 })
 	await assert.rejects(validateExistingAssetPack(config), /schemaVersion must be 1/)
@@ -274,10 +306,252 @@ test('generates and validates an Unreal texture list pack without local PNGs', a
 	await assert.rejects(validateExistingAssetPack(config), /unsupported textureSource/)
 })
 
+test('generates sign image background material instance variants', async () => {
+	const outputRoot = await mkdtemp(path.join(os.tmpdir(), 'sat-asset-tool-backgrounds-'))
+	const sourceDir = path.join(outputRoot, 'backgrounds')
+	const configPath = path.join(outputRoot, 'asset-pack.config.json')
+
+	await mkdir(sourceDir, { recursive: true })
+	await writeFile(path.join(sourceDir, 'tank.png'), testPng(80, 40))
+	await writeConfig(configPath, {
+		modRef: 'BackgroundPack',
+		name: 'Background Pack',
+		sectionName: 'Backgrounds',
+		assetPrefix: 'T_Background_',
+		idBase: 62000,
+		source: {
+			type: 'png-folder',
+			dir: sourceDir,
+			weight: '',
+		},
+		background: {
+			type: 'sign-image',
+			baseTileHeight: 400,
+			variants: [
+				{
+					suffix: 'contain',
+					displayNameSuffix: 'Contain',
+					mode: 'contain',
+				},
+				{
+					suffix: 'tile',
+					displayNameSuffix: 'Tile',
+					mode: 'tile',
+					tileWidth: 300,
+					tileHeight: 150,
+				},
+				{
+					suffix: 'cover-16x9',
+					displayNameSuffix: 'Cover 16x9',
+					mode: 'cover',
+					targetAspect: '16:9',
+					tileWidth: 1600,
+					tileHeight: 900,
+				},
+			],
+		},
+		output: {
+			root: outputRoot,
+		},
+	})
+
+	const config = await loadAssetPackConfig(configPath)
+	assert.equal(config.iconType, 'EIconType::ESIT_Material')
+	await generateAssetPack(config, { all: true })
+
+	const manifest = JSON.parse(
+		await readFile(path.join(outputRoot, 'SourceArt/Metadata/BackgroundPack.manifest.json'), 'utf8'),
+	) as AssetPackManifest
+
+	assert.deepEqual(
+		manifest.assets.map((asset) => [asset.ID, asset.slug, asset.textureAssetName, asset.iconAssetName, asset.iconObjectType]),
+		[
+			[62000, 'tank-contain', 'T_Background_TankContain', 'MI_BackgroundPack_TankContain', 'sign-background-material-instance'],
+			[62001, 'tank-tile', 'T_Background_TankTile', 'MI_BackgroundPack_TankTile', 'sign-background-material-instance'],
+			[62002, 'tank-cover-16x9', 'T_Background_TankCover16x9', 'MI_BackgroundPack_TankCover16x9', 'sign-background-material-instance'],
+		],
+	)
+
+	const containMetadata = JSON.parse(await readFile(path.join(outputRoot, 'SourceArt/Metadata/T_Background_TankContain.json'), 'utf8'))
+	assert.equal(containMetadata.unreal.iconLibraryEntry.IconType, 'EIconType::ESIT_Material')
+	assert.equal(
+		containMetadata.unreal.iconLibraryEntry.Texture,
+		'/BackgroundPack/SignBackgrounds/MI_BackgroundPack_TankContain.MI_BackgroundPack_TankContain',
+	)
+	assert.equal(
+		containMetadata.unreal.expectedTextureObjectPath,
+		'/BackgroundPack/Textures/T_Background_TankContain.T_Background_TankContain',
+	)
+	assert.equal(
+		containMetadata.unreal.expectedIconObjectPath,
+		'/BackgroundPack/SignBackgrounds/MI_BackgroundPack_TankContain.MI_BackgroundPack_TankContain',
+	)
+	assert.deepEqual(containMetadata.unreal.materialInstance.scalarParameters, {
+		FillMode: 1,
+		FitScale: 1,
+		TileWidth: 800,
+		TileHeight: 400,
+		RefractionDepthBias: 0,
+	})
+	assert.equal(containMetadata.unreal.textureSettings.AddressX, 'Wrap')
+	assert.equal(containMetadata.unreal.textureSettings.AddressY, 'Wrap')
+
+	const tileMetadata = JSON.parse(await readFile(path.join(outputRoot, 'SourceArt/Metadata/T_Background_TankTile.json'), 'utf8'))
+	assert.deepEqual(tileMetadata.unreal.materialInstance.scalarParameters, {
+		FillMode: 0,
+		FitScale: 1,
+		TileWidth: 300,
+		TileHeight: 150,
+		RefractionDepthBias: 0,
+	})
+
+	const coverDimensions = await readPngDimensions(path.join(outputRoot, 'SourceArt/Textures/T_Background_TankCover16x9.png'))
+	assert.deepEqual(coverDimensions, { width: 71, height: 40 })
+
+	const sidecar = JSON.parse(await readFile(path.join(outputRoot, 'Metadata/BackgroundPack_AssetMetadata.json'), 'utf8'))
+	assert.equal(
+		sidecar.assets['62000'].texturePath,
+		'/BackgroundPack/SignBackgrounds/MI_BackgroundPack_TankContain.MI_BackgroundPack_TankContain',
+	)
+	assert.equal(sidecar.assets['62000'].sourceTexturePath, '/BackgroundPack/Textures/T_Background_TankContain.T_Background_TankContain')
+	await assert.rejects(readFile(path.join(outputRoot, 'Resources/Icon128.png'), 'utf8'), /ENOENT/)
+
+	await validateExistingAssetPack(config)
+})
+
+test('rejects invalid sign image background config combinations', async () => {
+	const outputRoot = await mkdtemp(path.join(os.tmpdir(), 'sat-asset-tool-background-config-'))
+	const sourceDir = path.join(outputRoot, 'backgrounds')
+	const configPath = path.join(outputRoot, 'asset-pack.config.json')
+
+	await mkdir(sourceDir, { recursive: true })
+	await writeFile(path.join(sourceDir, 'tank.png'), testPng(8, 8))
+
+	await writeConfig(configPath, {
+		modRef: 'BackgroundPack',
+		iconType: 'Monochrome',
+		source: {
+			type: 'png-folder',
+			dir: sourceDir,
+			weight: '',
+		},
+		background: {
+			type: 'sign-image',
+		},
+		output: {
+			root: outputRoot,
+		},
+	})
+	await assert.rejects(loadAssetPackConfig(configPath), /background\.type "sign-image" requires iconType Material/)
+
+	await writeConfig(configPath, {
+		modRef: 'BackgroundPack',
+		source: {
+			type: 'png-folder',
+			dir: sourceDir,
+			weight: '',
+		},
+		background: {
+			type: 'sign-image',
+			mode: 'cover',
+		},
+		output: {
+			root: outputRoot,
+		},
+	})
+	await assert.rejects(loadAssetPackConfig(configPath), /cover mode requires targetAspect or both tileWidth and tileHeight/)
+
+	await writeConfig(configPath, {
+		modRef: 'BackgroundPack',
+		source: {
+			type: 'unreal-texture-list',
+			assets: [
+				{
+					slug: 'factory-texture',
+					textureObjectPath: '/Game/FactoryGame/Texture.Texture',
+				},
+			],
+		},
+		background: {
+			type: 'sign-image',
+			mode: 'cover',
+			targetAspect: '1:1',
+		},
+		output: {
+			root: outputRoot,
+		},
+	})
+	await assert.rejects(loadAssetPackConfig(configPath), /cover mode requires local svg-folder or png-folder sources/)
+})
+
+test('validates sign image material-instance metadata before Unreal import', async () => {
+	const outputRoot = await mkdtemp(path.join(os.tmpdir(), 'sat-asset-tool-background-validation-'))
+	const sourceDir = path.join(outputRoot, 'backgrounds')
+	const configPath = path.join(outputRoot, 'asset-pack.config.json')
+
+	await mkdir(sourceDir, { recursive: true })
+	await writeFile(path.join(sourceDir, 'tank.png'), testPng(16, 8))
+	await writeConfig(configPath, {
+		modRef: 'BackgroundPack',
+		assetPrefix: 'T_Background_',
+		idBase: 62000,
+		source: {
+			type: 'png-folder',
+			dir: sourceDir,
+			weight: '',
+		},
+		background: {
+			type: 'sign-image',
+		},
+		output: {
+			root: outputRoot,
+		},
+	})
+
+	const config = await loadAssetPackConfig(configPath)
+	await generateAssetPack(config, { all: true })
+	await validateExistingAssetPack(config)
+
+	const metadataPath = path.join(outputRoot, 'SourceArt/Metadata/T_Background_Tank.json')
+	const metadata = JSON.parse(await readFile(metadataPath, 'utf8'))
+	await writeFile(
+		metadataPath,
+		`${JSON.stringify({ ...metadata, unreal: { ...metadata.unreal, iconObjectType: 'texture' } }, null, 2)}\n`,
+		'utf8',
+	)
+	await assert.rejects(validateExistingAssetPack(config), /iconObjectType texture does not match manifest/)
+
+	await writeFile(
+		metadataPath,
+		`${JSON.stringify({ ...metadata, unreal: { ...metadata.unreal, materialInstance: null } }, null, 2)}\n`,
+		'utf8',
+	)
+	await assert.rejects(validateExistingAssetPack(config), /requires materialInstance metadata/)
+})
+
 async function writeConfig(configPath: string, config: unknown): Promise<void> {
 	await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
 }
 
 async function writeManifest(manifestPath: string, manifest: unknown): Promise<void> {
 	await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+}
+
+async function packageVersion(packagePath: string): Promise<string> {
+	const packageJson = JSON.parse(await readFile(packagePath, 'utf8')) as { version: string }
+	return packageJson.version
+}
+
+function testPng(width: number, height: number): Buffer {
+	return writePngRgba(
+		width,
+		height,
+		Buffer.from(
+			Uint8Array.from({ length: width * height * 4 }, (_, byteIndex) => {
+				const channel = byteIndex % 4
+				const pixel = (byteIndex - channel) / 4
+				return channel === 0 ? pixel % 256 : channel === 1 ? Math.floor(pixel / width) % 256 : 255
+			}),
+		),
+	)
 }

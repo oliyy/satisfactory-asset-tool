@@ -14,6 +14,7 @@ The tool currently supports two sources for automatic asset creation:
 | SVG source files | Generate PNGs, import them as new mod textures, and register them in an icon library | `source.type: "svg-folder"` |
 | PNG source files | Import local images as new mod textures and register them in an icon library | `source.type: "png-folder"` |
 | Existing Starter Project textures | Make vanilla or starter-project textures appear in the icon picker | `sat scan-textures`, then `source.type: "unreal-texture-list"` |
+| PNG/SVG sign background images | Import images, wrap them in stock sign background material instances, and register them as sign backgrounds | `source.type: "png-folder"` or `source.type: "svg-folder"` with `background.type: "sign-image"` |
 
 Commands are non-interactive and return nonzero exit codes on failure, so they are usable from scripts and CI. Unreal commands also print the resolved log path and a filtered log tail.
 
@@ -80,6 +81,52 @@ For existing Unreal textures, first scan for candidates with `sat scan-textures`
 				"slug": "portable-miner",
 				"displayName": "Portable Miner",
 				"textureObjectPath": "/Game/FactoryGame/IconDesc_PortableMiner_256.IconDesc_PortableMiner_256"
+			}
+		]
+	},
+	"output": {
+		"root": "."
+	}
+}
+```
+
+For image-backed sign backgrounds, use local SVG or RGBA PNG sources and enable sign-image background generation. JPEG, WebP, RGB PNG, indexed PNG, and grayscale PNG sources must be converted to 8-bit RGBA PNG before generation.
+
+```json
+{
+	"modRef": "MyBackgroundPack",
+	"name": "My Background Pack",
+	"sectionName": "My Backgrounds",
+	"assetPrefix": "T_MyBG_",
+	"idBase": 62000,
+	"source": {
+		"type": "png-folder",
+		"dir": "backgrounds",
+		"weight": "",
+		"name": "Local Backgrounds"
+	},
+	"background": {
+		"type": "sign-image",
+		"variants": [
+			{
+				"suffix": "contain",
+				"displayNameSuffix": "Contain",
+				"mode": "contain"
+			},
+			{
+				"suffix": "cover-2x1",
+				"displayNameSuffix": "Cover 2x1",
+				"mode": "cover",
+				"targetAspect": "2:1",
+				"tileWidth": 800,
+				"tileHeight": 400
+			},
+			{
+				"suffix": "tile",
+				"displayNameSuffix": "Tile",
+				"mode": "tile",
+				"tileWidth": 400,
+				"tileHeight": 400
 			}
 		]
 	},
@@ -232,7 +279,7 @@ Top-level fields:
 | `iconType` | no | `Monochrome` | Satisfactory `EIconType` for generated `FIconData` entries |
 | `size` | no | `512` | Square PNG output size in pixels |
 | `color` | no | `#ffffff` | SVG render color (sets root `color` and `fill` before rendering) |
-| `pluginIconAsset` | no | — | Source slug for `Resources/Icon128.png`. On by default for SVG/PNG modes, off for `unreal-texture-list` |
+| `pluginIconAsset` | no | — | Source slug for `Resources/Icon128.png`. On by default for normal SVG/PNG icon packs, off for `unreal-texture-list` and `background.type: "sign-image"` |
 
 Accepted `iconType` values: `Building`, `Part`, `Equipment`, `Monochrome`, `Material`, `Custom`, `MapStamp`, `None`. Short names, Unreal enum names like `ESIT_Monochrome`, and fully qualified names are all accepted.
 
@@ -269,7 +316,7 @@ Scans `source.dir` for `.svg` files. Slugs are normalized from filenames. If `we
 }
 ```
 
-Scans `source.dir` for `.png` files. PNGs are copied into the generated texture output directory and validated unless `--skip-png-validation` is set.
+Scans `source.dir` for `.png` files. PNGs are copied into the generated texture output directory and validated unless `--skip-png-validation` is set. Normal icon PNGs must be square white RGBA images at the configured `size`; sign background PNGs may be colored and non-square but must still be 8-bit RGBA PNGs.
 
 `unreal-texture-list`
 
@@ -291,6 +338,8 @@ Scans `source.dir` for `.png` files. PNGs are copied into the generated texture 
 
 Each entry requires `slug` and `textureObjectPath` (full Unreal object path as `packageName.assetName`). `displayName` is optional and derived from the slug when omitted. Generation skips SVG/PNG rendering. Import loads the existing `Texture2D` and registers it in the `FGIconLibrary`.
 
+Existing Unreal textures can also be wrapped as sign-image backgrounds for `contain` and `tile` modes. `cover` mode requires local `svg-folder` or `png-folder` sources because the tool has to crop the generated PNG before import.
+
 Shared source fields:
 
 - `source.type`: one of `svg-folder`, `png-folder`, or `unreal-texture-list`
@@ -300,6 +349,32 @@ Shared source fields:
 - `source.name`, `source.catalog`, `source.catalogVersion`, `source.catalogPath`, `source.license`: sidecar metadata fields
 - `source.slugOverrides`: maps generated asset slugs to catalog names when catalog metadata uses a different name
 - `styleSuffixes`: optional top-level suffix list to strip from source filenames; defaults to `["bold", "duotone", "fill", "light", "regular", "thin"]`
+
+## Sign Background Images
+
+`background.type: "sign-image"` converts each selected source image into one or more Satisfactory sign background entries. Local SVG/PNG sources are imported as `Texture2D` assets, then wrapped in generated `MaterialInstanceConstant` assets parented to the stock sign background material:
+
+```text
+/Game/FactoryGame/Interface/UI/InGame/Signs/SignBackgrounds/MM_UI_SignBG.MM_UI_SignBG
+```
+
+The generated `FGIconLibrary` entry uses `IconType: Material`, writes directly to `mIconData`, and points `FIconData.Texture` at the generated material instance. This matches the tested in-game contract for custom sign backgrounds.
+
+Supported modes:
+
+| Mode | Behavior | Material parameters |
+| --- | --- | --- |
+| `contain` | Shows the image once while preserving aspect. Different sign aspects may leave side/top gaps. | `FillMode=1`, `FitScale=1`, `TileWidth`/`TileHeight` from image or config |
+| `cover` | Center-crops the generated PNG to a target aspect, then shows it once. Use for full-bleed sign targets. | `FillMode=1`, `FitScale=1`, `TileWidth`/`TileHeight` from target aspect/config |
+| `tile` | Repeats the image. Use for seamless patterns. | `FillMode=0`, configured `TileWidth`/`TileHeight` |
+
+`TileWidth` and `TileHeight` are always emitted for sign-image backgrounds because Satisfactory's stock sign background material uses them for runtime sizing even when `FillMode=1`.
+
+`cover` variants must define `targetAspect` or both `tileWidth` and `tileHeight`. Existing Unreal texture sources cannot use `cover`, because they cannot be cropped by the generator.
+
+If `background.variants` is omitted, one background entry is generated per source image using the top-level background settings. If variants are configured, each source image produces one entry per variant. Variant suffixes become part of the generated slug and asset names.
+
+Generated source textures use `unreal.textureDir`, while material instances use `background.materialDir` (`SignBackgrounds` by default). It is valid to point both at the same folder; the generated texture and material names stay distinct through `T_` and `MI_` prefixes.
 
 ## Naming And Selection
 
@@ -354,21 +429,26 @@ Outputs by source mode:
 | `Metadata/<ModRef>_AssetMetadata.json`       | yes             | yes             | yes                     |
 | `Resources/Icon128.png`                      | yes, by default | yes, by default | no, by default          |
 
+For `background.type: "sign-image"`, local source modes still write PNGs under `SourceArt/Textures`, but the icon library entry points at a generated material instance under `/<ModRef>/<background.materialDir>/...`.
+
+Sign-image packs do not write `Resources/Icon128.png` by default, even with `svg-folder` or `png-folder` sources. Provide a deliberate plugin icon yourself, set `pluginIconAsset`, or pass `--skip-plugin-icon` explicitly in release scripts.
+
 ## Unreal Import
 
 Run `sat generate` before `sat import`. Import consumes the generated manifest and per-asset metadata; it does not rediscover source SVG, PNG, or texture-list config entries.
 
 Before launching Unreal, `sat import` runs the same validation as `sat validate`, so imports will fail early if files are inconsistent. Keep `sat validate` in CI or release scripts for a faster standalone check.
 
-| Step                                           | `svg-folder` / `png-folder` | `unreal-texture-list`            |
-| ---------------------------------------------- | --------------------------- | -------------------------------- |
-| Validate source PNGs                           | yes                         | no                               |
-| Import textures with `AssetImportTask`         | yes                         | no                               |
-| Load existing textures via `unreal.load_asset` | no                          | yes (verifies `Texture2D`)       |
-| Apply texture settings                         | yes                         | no                               |
-| Create/update `FGIconLibrary`                  | yes                         | yes                              |
-| Create/update `FGGameFeatureData`              | yes                         | yes                              |
-| Save assets                                    | all generated + imported    | icon library + game feature only |
+| Step | `svg-folder` / `png-folder` | `unreal-texture-list` |
+| --- | --- | --- |
+| Validate source PNGs | yes | no |
+| Import textures with `AssetImportTask` | yes | no |
+| Load existing textures via `unreal.load_asset` | no | yes (verifies `Texture2D`) |
+| Apply texture settings | yes | no |
+| Create/update sign background material instance | when `background.type` is `sign-image` | when `background.type` is `sign-image` and mode is `contain` or `tile` |
+| Create/update `FGIconLibrary` | yes | yes |
+| Create/update `FGGameFeatureData` | yes | yes |
+| Save assets | all generated + imported | icon library + game feature only |
 
 Before launching Unreal, `sat import` verifies that the editor binary, project file, Python importer, and manifest exist. It also verifies that the mod is mounted at `<projectRoot>/Mods/GameFeatures/<modRef>`, matching `output.root`. Stale direct mounts at `<projectRoot>/Mods/<modRef>` fail the import. Use `--skip-mount-check` only with `--dry-run`.
 
@@ -432,6 +512,8 @@ Manifest (`<ModRef>.manifest.json`):
 ```
 
 For existing Unreal textures, entries use `"textureSource": "unreal-existing"` with `textureObjectPath` instead of `texturePath`.
+
+Sign background entries additionally include `iconObjectType`, `iconAssetName`, and `iconObjectPath`. In per-asset metadata, `expectedTextureObjectPath` is the imported or loaded source texture, while `expectedIconObjectPath` is the object assigned to `FIconData.Texture`. For sign-image backgrounds, `expectedIconObjectPath` is the generated material instance.
 
 ID lock (`<ModRef>.id-lock.json`):
 
@@ -504,6 +586,8 @@ Generated Unreal object paths:
 
 Texture settings are applied to imported generated PNG textures only. The importer supports `NoMipmaps`, `Default` compression, `sRGB`, and texture groups `Project01`, `UI Streamable`, and `UI`. Existing Unreal textures are not modified.
 
+Sign-image background imports also set texture address modes to wrap by default and create material instances under `background.materialDir`, which defaults to `SignBackgrounds`.
+
 ## Troubleshooting
 
 > **Mount check fails** Make sure `output.root` resolves to `<projectRoot>/Mods/GameFeatures/<modRef>`. Remove stale direct mounts at `<projectRoot>/Mods/<modRef>`.
@@ -514,7 +598,13 @@ Texture settings are applied to imported generated PNG textures only. The import
 
 > **Generated source texture is missing during import** Run `sat generate` before `sat import`. Generated SVG/PNG modes require the manifest `texturePath` to point at an existing PNG.
 
-> **PNG validation fails** Generated SVG/PNG icon textures are expected to be square white RGBA PNGs of the configured `size`. Use `--skip-png-validation` only for debugging or intentionally nonstandard inputs.
+> **PNG validation fails for icon packs** Generated SVG/PNG icon textures are expected to be square white RGBA PNGs of the configured `size`. Use `--skip-png-validation` only for debugging or intentionally nonstandard inputs.
+
+> **PNG validation fails for sign backgrounds** Sign background source images must be 8-bit RGBA PNGs. Convert JPEG, WebP, RGB PNG, indexed PNG, or grayscale PNG files to RGBA PNG before running `sat generate`.
+
+> **Sign background renders square in-world** Make sure the generated material instance has `TileWidth` and `TileHeight` matching the intended aspect. These values matter even when `FillMode=1`.
+
+> **Sign background preview works but in-world render is wrong** Validate the saved sign in-world. The picker thumbnail, designer preview, and in-world sign are different render paths.
 
 > **Unreal logs are hard to find** Use `--log /absolute/path/to/import.log`, `--log-tail-lines N`, or `--no-log-tail`. The launcher uses `-abslog` so absolute log paths are honored.
 
