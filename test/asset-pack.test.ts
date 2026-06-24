@@ -75,6 +75,40 @@ test('generates and validates a Phosphor-style icon pack', async () => {
 	await validateExistingAssetPack(config)
 })
 
+test('preserves an existing plugin icon unless overwrite is requested', async () => {
+	const outputRoot = await mkdtemp(path.join(os.tmpdir(), 'sat-asset-tool-plugin-icon-'))
+	const sourceDir = path.join(outputRoot, 'icons')
+	const configPath = path.join(outputRoot, 'asset-pack.config.json')
+	const pluginIconPath = path.join(outputRoot, 'Resources/Icon128.png')
+	const generatedIcon = testWhiteIconPng(8)
+	const customIcon = Buffer.from('custom plugin icon')
+
+	await mkdir(sourceDir, { recursive: true })
+	await mkdir(path.dirname(pluginIconPath), { recursive: true })
+	await writeFile(path.join(sourceDir, 'engine.png'), generatedIcon)
+	await writeFile(pluginIconPath, customIcon)
+	await writeConfig(configPath, {
+		modRef: 'PluginIconPack',
+		size: 8,
+		pluginIconAsset: 'engine',
+		source: {
+			type: 'png-folder',
+			dir: sourceDir,
+			weight: '',
+		},
+		output: {
+			root: outputRoot,
+		},
+	})
+
+	const config = await loadAssetPackConfig(configPath)
+	await generateAssetPack(config, { all: true })
+	assert.deepEqual(await readFile(pluginIconPath), customIcon)
+
+	await generateAssetPack(config, { all: true, overwritePluginIcon: true })
+	assert.deepEqual(await readFile(pluginIconPath), generatedIcon)
+})
+
 test('fails when PNG source filenames normalize to the same slug', async () => {
 	const outputRoot = await mkdtemp(path.join(os.tmpdir(), 'sat-asset-tool-png-collision-'))
 	const sourceDir = path.join(outputRoot, 'icons')
@@ -551,6 +585,21 @@ function testPng(width: number, height: number): Buffer {
 				const channel = byteIndex % 4
 				const pixel = (byteIndex - channel) / 4
 				return channel === 0 ? pixel % 256 : channel === 1 ? Math.floor(pixel / width) % 256 : 255
+			}),
+		),
+	)
+}
+
+function testWhiteIconPng(size: number): Buffer {
+	return writePngRgba(
+		size,
+		size,
+		Buffer.from(
+			Uint8Array.from({ length: size * size * 4 }, (_, byteIndex) => {
+				const channel = byteIndex % 4
+				const pixel = (byteIndex - channel) / 4
+				const visible = pixel % 2 === 0
+				return visible ? 255 : 0
 			}),
 		),
 	)

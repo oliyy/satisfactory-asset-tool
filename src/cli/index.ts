@@ -58,7 +58,7 @@ async function runGenerate(parsed: ParsedArgs): Promise<void> {
 		validateOnly: false,
 		validatePng: !booleanOption(parsed, 'skip-png-validation'),
 		idLock: !booleanOption(parsed, 'skip-id-lock'),
-		writePluginIcon: booleanOption(parsed, 'skip-plugin-icon') ? false : undefined,
+		overwritePluginIcon: booleanOption(parsed, 'overwrite-plugin-icon'),
 		assets,
 		limit: optionalIntegerOption(parsed, 'limit'),
 	}
@@ -200,7 +200,7 @@ function isBooleanFlag(key: string): boolean {
 		'include-dimensions',
 		'skip-png-validation',
 		'skip-id-lock',
-		'skip-plugin-icon',
+		'overwrite-plugin-icon',
 		'skip-mount-check',
 		'no-log-tail',
 		'help',
@@ -310,7 +310,7 @@ Generation options:
   --id-base N
   --skip-png-validation
   --skip-id-lock
-  --skip-plugin-icon
+  --overwrite-plugin-icon
 
 Import options:
   --project-root PATH

@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 import { catalogEntryForRecord, cleanSearchTerms, loadSourceCatalog } from '../adapters/catalog-metadata.js'
@@ -33,7 +33,7 @@ export interface AssetPackGenerateOptions {
 	validateOnly?: boolean
 	validatePng?: boolean
 	idLock?: boolean
-	writePluginIcon?: boolean
+	overwritePluginIcon?: boolean
 	limit?: number | null
 	manifestPath?: string
 }
@@ -294,7 +294,7 @@ export function assetPackMetadataPath(config: AssetPackConfig): string {
 function normalizeOptions(
 	config: AssetPackConfig,
 	options: AssetPackGenerateOptions,
-): Required<Omit<AssetPackGenerateOptions, 'limit' | 'manifestPath'>> & { limit: number | null } {
+): Required<Omit<AssetPackGenerateOptions, 'limit' | 'manifestPath'>> & { limit: number | null; writePluginIcon: boolean } {
 	return {
 		assets: (options.assets ?? [])
 			.map((asset) =>
@@ -309,7 +309,8 @@ function normalizeOptions(
 		validateOnly: options.validateOnly ?? false,
 		validatePng: options.validatePng ?? true,
 		idLock: options.idLock ?? true,
-		writePluginIcon: options.writePluginIcon ?? (config.source.type !== 'unreal-texture-list' && config.background.type !== 'sign-image'),
+		overwritePluginIcon: options.overwritePluginIcon ?? false,
+		writePluginIcon: config.source.type !== 'unreal-texture-list' && config.background.type !== 'sign-image',
 		limit: options.limit ?? null,
 	}
 }
@@ -494,7 +495,7 @@ async function processRecords(
 	}, Promise.resolve())
 
 	if (options.writePluginIcon && pluginIconRecord) {
-		await writePluginIcon(config, pluginIconRecord)
+		await writePluginIcon(config, pluginIconRecord, options.overwritePluginIcon)
 	}
 
 	const manifest = buildManifest(config, records)
@@ -570,9 +571,14 @@ async function validateOrReadPngDimensions(
 	return undefined
 }
 
-async function writePluginIcon(config: AssetPackConfig, pluginIconRecord: AssetRecord): Promise<void> {
+async function writePluginIcon(config: AssetPackConfig, pluginIconRecord: AssetRecord, overwrite: boolean): Promise<void> {
 	if (pluginIconRecord.sourceType === 'unreal-texture') {
-		throw new Error('Plugin icon generation is not supported for source.type "unreal-texture-list"; use --skip-plugin-icon')
+		throw new Error('Plugin icon generation is not supported for source.type "unreal-texture-list"')
+	}
+
+	if (!overwrite && (await fileExists(config.output.pluginIconPath))) {
+		console.log(`Plugin icon exists; leaving unchanged: ${path.relative(process.cwd(), config.output.pluginIconPath)}`)
+		return
 	}
 
 	await mkdir(path.dirname(config.output.pluginIconPath), { recursive: true })
@@ -585,6 +591,17 @@ async function writePluginIcon(config: AssetPackConfig, pluginIconRecord: AssetR
 		await renderPng(tempSvgPath, config.output.pluginIconPath, 128)
 	} else {
 		await copyFile(pluginIconRecord.sourcePath, config.output.pluginIconPath)
+	}
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+	try {
+		return (await stat(filePath)).isFile()
+	} catch (error) {
+		if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+			return false
+		}
+		throw error
 	}
 }
 

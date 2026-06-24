@@ -1,6 +1,6 @@
 {
 	"name": "@oliyy_/satisfactory-asset-tool",
-	"version": "0.2.0",
+	"version": "0.3.2",
 	"description": "Node-first tooling for generating Satisfactory asset-pack source files and importing them into Unreal.",
 	"license": "MIT",
 	"type": "module",
@@ -37,14 +37,14 @@
 		"format:check": "prettier --check .",
 		"lint": "eslint .",
 		"prepack": "pnpm build",
-		"publish:npm": "pnpm release:check && pnpm publish --access public --registry https://registry.npmjs.org/ --config.@oliyy_:registry=https://registry.npmjs.org/ --no-git-checks",
 		"release:check": "pnpm check && pnpm test && pnpm pack --dry-run",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"test": "pnpm build && node --test dist/test/**/*.test.js",
 		"sat": "pnpm build && node ./dist/src/cli/index.js",
 		"version:major": "pnpm version major",
 		"version:minor": "pnpm version minor",
-		"version:patch": "pnpm version patch"
+		"version:patch": "pnpm version patch",
+		"publish:npm": "pnpm release:check && pnpm publish --access public --registry https://registry.npmjs.org/ --config.@oliyy_:registry=https://registry.npmjs.org/ --no-git-checks"
 	},
 	"engines": {
 		"node": ">=24"
